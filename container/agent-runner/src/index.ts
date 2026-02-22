@@ -22,10 +22,8 @@ import {
   SessionConfig,
   ResumeSessionConfig,
   SessionEvent,
-  SessionHooks,
-  PreToolUseHookInput,
-  approveAll,
 } from '@github/copilot-sdk';
+import type { PermissionRequest, PermissionRequestResult } from '@github/copilot-sdk';
 import { fileURLToPath } from 'url';
 
 interface ContainerInput {
@@ -288,10 +286,10 @@ function buildSessionConfig(
     ...Object.keys(containerInput.secrets || {}),
   ];
 
-  const hooks: SessionHooks = {
+  const hooks: SessionConfig['hooks'] = {
     // Sanitize bash commands: strip secret env vars from subprocess environments.
     // Mirrors the original PreToolUse/Bash hook from the Claude Agent SDK.
-    onPreToolUse: async (input: PreToolUseHookInput) => {
+    onPreToolUse: async (input) => {
       if (input.toolName !== 'Bash' && input.toolName !== 'bash') return;
       const args = input.toolArgs as { command?: string };
       if (!args?.command) return;
@@ -325,7 +323,7 @@ function buildSessionConfig(
     systemMessage: globalClaudeMd
       ? { mode: 'append', content: globalClaudeMd }
       : undefined,
-    onPermissionRequest: approveAll,
+    onPermissionRequest: async (_request: PermissionRequest): Promise<PermissionRequestResult> => ({ kind: 'approved' }),
     hooks,
     skillDirectories: skillDirectories.length > 0 ? skillDirectories : undefined,
     mcpServers: {

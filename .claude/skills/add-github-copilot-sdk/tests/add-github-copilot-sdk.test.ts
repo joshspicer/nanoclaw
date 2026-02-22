@@ -180,9 +180,9 @@ describe('add-github-copilot-sdk applied changes', () => {
       expect(content).toContain('600_000');
     });
 
-    it('uses approveAll for headless permission handling', () => {
-      expect(content).toContain('approveAll');
-      expect(content).toContain('onPermissionRequest: approveAll');
+    it('uses approve-all for headless permission handling', () => {
+      expect(content).toContain('onPermissionRequest');
+      expect(content).toMatch(/kind.*approved/);
     });
 
     it('has onPreToolUse hook for secret stripping', () => {
