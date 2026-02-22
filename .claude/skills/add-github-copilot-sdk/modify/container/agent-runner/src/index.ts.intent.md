@@ -7,12 +7,13 @@ Complete rewrite of the agent runner from Claude Agent SDK (`ClaudeClient`/`Sess
 
 ### Imports
 - Replaced: `ClaudeClient`, `Session` from `@anthropic-ai/claude-agent-sdk`
-- Added: `CopilotClient`, `CopilotSession`, `SessionConfig`, `ResumeSessionConfig`, `SessionEvent`, `SessionHooks`, `PreToolUseHookInput`, `approveAll` from `@github/copilot-sdk`
+- Added: `CopilotClient`, `CopilotSession`, `SessionConfig`, `ResumeSessionConfig`, `SessionEvent` from `@github/copilot-sdk`
+- Added: `PermissionRequest`, `PermissionRequestResult` type imports for custom permission handler
 
 ### Authentication
 - Replaced: `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` extraction
 - Added: `githubToken` extracted from `secrets.GITHUB_TOKEN || secrets.GH_TOKEN`
-- Client construction: `new CopilotClient({ githubToken })` instead of `new ClaudeClient(apiKey)`
+- Client construction: `new CopilotClient({ githubToken, env: minimalEnv })` — passes minimal env to isolate CLI subprocess
 
 ### Session lifecycle
 - `client.createSession(config)` / `client.resumeSession(config)` instead of `client.newSession()` / `client.resume()`
@@ -23,13 +24,38 @@ Complete rewrite of the agent runner from Claude Agent SDK (`ClaudeClient`/`Sess
 - `configDir: '/home/node/.copilot'` for session persistence
 - `skillDirectories` discovered from `/workspace/skills/`
 - `systemMessage: { content: systemPrompt, mode: 'append' }` instead of `systemPrompt` string
-- `onPermissionRequest: approveAll` for headless operation
+- Custom `onPermissionRequest` handler returning `{ kind: 'approved' }` for headless operation
 - MCP servers configured with `tools: ['*']` wildcard
+- `model` field from `containerInput.model` for per-request model selection
+
+### Security hardening
+
+**Minimal CLI environment** (`env` option on CopilotClient):
+- Passes only `HOME`, `PATH`, `NODE_OPTIONS`, `LANG` to CLI subprocess
+- Prevents CLI child from inheriting host secrets via `process.env`
+- Limits what `/proc/<pid>/environ` exposes inside the container
+
+**Post-init secret scrubbing** (after `client.start()`):
+- Deletes `containerInput.secrets` and `containerInput.githubToken` from memory
+- Clears `process.env.COPILOT_SDK_AUTH_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`
+- Token is already passed to CLI subprocess — no longer needed in agent-runner
+
+**Hardened onPreToolUse hook**:
+- Bash commands: injects `unset` prefix for all secret env vars
+- Bash commands: blocks any command reading `/proc/*/environ` (returns deny)
+- File read tools (Read, ReadFile): blocks reads of sensitive paths
+- `SENSITIVE_PATH_PATTERNS`: `/proc/*/environ`, `/tmp/input.json` (legacy)
+
+**Entrypoint change** (Dockerfile):
+- Stdin piped directly to Node via `exec` — no intermediate temp file
+- Eliminates race condition where `/tmp/input.json` contained secrets on disk
 
 ### Secret stripping (onPreToolUse hook)
 - `ALWAYS_STRIP_VARS = ['COPILOT_SDK_AUTH_TOKEN']`
 - Dynamic: `Object.keys(containerInput.secrets)` computed at runtime
 - Injects `unset` commands before bash tool calls to prevent secret leakage
+- Blocks `/proc/*/environ` reads via Bash with `permissionDecision: 'deny'`
+- Blocks file reads of sensitive paths (Read/ReadFile tools) with path pattern matching
 
 ### Session events
 - `session.compaction_start` for context window compaction logging

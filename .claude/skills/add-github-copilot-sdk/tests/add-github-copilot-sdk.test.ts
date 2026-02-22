@@ -84,14 +84,17 @@ describe('add-github-copilot-sdk skill package', () => {
 
     expect(skillMd).toContain('## Architecture Notes');
     expect(skillMd).toContain('### Authentication Flow');
+    expect(skillMd).toContain('### Token Isolation');
     expect(skillMd).toContain('### Session Persistence');
     expect(skillMd).toContain('### Gotchas');
 
     // Key gotchas that prevent real bugs
     expect(skillMd).toContain('Default timeout is 60s');
     expect(skillMd).toContain('Permissions default to deny');
-    expect(skillMd).toContain('CLI inherits parent env');
+    expect(skillMd).toContain('CLI inherits parent env by default');
     expect(skillMd).toContain('MCP servers require `tools` field');
+    expect(skillMd).toContain('/proc/environ');
+    expect(skillMd).toContain('permissionDecision');
   });
 
   it('has a SKILL.md with Claude SDK comparison and rollback', () => {
@@ -138,6 +141,12 @@ describe('add-github-copilot-sdk applied changes', () => {
       expect(content).not.toContain('@anthropic-ai');
     });
 
+    it('pipes stdin directly to Node (no temp file)', () => {
+      expect(content).toContain('exec node');
+      expect(content).not.toContain('cat > /tmp/input.json');
+      expect(content).toContain('never written to disk');
+    });
+
     it('references Copilot SDK in comments', () => {
       expect(content).toContain('Copilot SDK');
       expect(content).not.toContain('Claude Agent SDK');
@@ -175,6 +184,11 @@ describe('add-github-copilot-sdk applied changes', () => {
       expect(content).not.toMatch(/process\.env\.(GITHUB_TOKEN|GH_TOKEN|COPILOT_SDK_AUTH_TOKEN)\s*=/);
     });
 
+    it('does not write secrets to temp file', () => {
+      // No reference to /tmp/input.json for writing (reading/blocking is OK)
+      expect(content).not.toContain("fs.unlinkSync('/tmp/input.json')");
+    });
+
     it('uses sendAndWait with adequate timeout', () => {
       expect(content).toContain('sendAndWait');
       expect(content).toContain('600_000');
@@ -185,10 +199,36 @@ describe('add-github-copilot-sdk applied changes', () => {
       expect(content).toMatch(/kind.*approved/);
     });
 
+    it('passes minimal env to CopilotClient', () => {
+      expect(content).toContain('minimalEnv');
+      expect(content).toContain("env: minimalEnv");
+      // Only HOME, PATH, NODE_OPTIONS, LANG
+      expect(content).toContain("HOME: '/home/node'");
+    });
+
+    it('scrubs secrets after client.start()', () => {
+      expect(content).toContain('delete containerInput.secrets');
+      expect(content).toContain('delete process.env.COPILOT_SDK_AUTH_TOKEN');
+      expect(content).toContain('delete process.env.GITHUB_TOKEN');
+      expect(content).toContain('delete process.env.GH_TOKEN');
+    });
+
     it('has onPreToolUse hook for secret stripping', () => {
       expect(content).toContain('onPreToolUse');
       expect(content).toContain('COPILOT_SDK_AUTH_TOKEN');
       expect(content).toContain('unset');
+    });
+
+    it('blocks /proc/environ reads in Bash commands', () => {
+      expect(content).toContain('/proc/');
+      expect(content).toContain('environ');
+      expect(content).toContain('permissionDecision');
+    });
+
+    it('blocks file reads of sensitive paths', () => {
+      expect(content).toContain('SENSITIVE_PATH_PATTERNS');
+      expect(content).toContain('ReadFile');
+      expect(content).toContain('read_file');
     });
 
     it('computes secret env vars dynamically from secrets keys', () => {

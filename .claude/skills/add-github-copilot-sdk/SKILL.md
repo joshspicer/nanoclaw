@@ -112,6 +112,14 @@ const client = new CopilotClient({
   cwd: '/workspace',               // Working directory for CLI process
   logLevel: 'info',                // 'none' | 'error' | 'warning' | 'info' | 'debug' | 'all'
 
+  // SECURITY: Pass minimal env to prevent host secret leakage
+  env: {
+    HOME: '/home/node',
+    PATH: '/usr/local/bin:/usr/bin:/bin',
+    NODE_OPTIONS: '--dns-result-order=ipv4first',
+    LANG: 'C.UTF-8',
+  },
+
   // Advanced:
   // cliPath: '/path/to/cli',      // Custom CLI path (default: bundled @github/copilot)
   // cliArgs: ['--flag'],          // Extra CLI args
@@ -119,7 +127,6 @@ const client = new CopilotClient({
   // cliUrl: 'localhost:8080',     // Connect to existing CLI server
   // autoStart: true,              // Auto-start on first use (default: true)
   // autoRestart: true,            // Auto-restart on crash (default: true)
-  // env: { KEY: 'value' },        // Custom env vars for CLI process
 });
 
 await client.start();
@@ -151,8 +158,7 @@ const config: SessionConfig = {
   // OR: { mode: 'replace', content: 'Full replacement prompt' }
 
   // Permissions — IMPORTANT: default is deny-all!
-  onPermissionRequest: approveAll,              // Auto-approve everything
-  // OR: async (request) => ({ allow: true/false })
+  onPermissionRequest: async (request) => ({ kind: 'approved' }),
 
   // Hooks
   hooks: {
@@ -275,18 +281,43 @@ Key event types (discriminated union on `type` field):
 ### PreToolUse Hook
 
 ```typescript
-// Modify tool arguments before execution
-onPreToolUse: async (input: PreToolUseHookInput) => {
-  // input.toolName: string — e.g., 'Bash', 'Read', 'Write'
-  // input.toolArgs: unknown — tool-specific arguments
+// Block sensitive paths and strip secrets from bash commands
+onPreToolUse: async (input) => {
+  const toolName = input.toolName;
 
-  // Return nothing to allow unchanged
-  // Return { modifiedArgs } to modify arguments
-  // Return { decision: 'deny', reason: '...' } to block
-  if (input.toolName === 'Bash') {
+  // --- Bash commands: strip secret env vars + block /proc/environ reads ---
+  if (toolName === 'Bash' || toolName === 'bash') {
     const args = input.toolArgs as { command?: string };
-    return { modifiedArgs: { ...args, command: 'unset SECRET; ' + args.command } };
+    if (!args?.command) return;
+
+    // Block commands that try to read /proc/*/environ
+    if (/\/proc\/[^/]+\/environ/.test(args.command)) {
+      return {
+        permissionDecision: 'deny' as const,
+        permissionDecisionReason: 'Reading /proc/*/environ is blocked to protect secrets',
+      };
+    }
+
+    const unsetPrefix = `unset ${secretEnvVars.join(' ')} 2>/dev/null; `;
+    return { modifiedArgs: { ...args, command: unsetPrefix + args.command } };
   }
+
+  // --- File read tools: block reads of sensitive paths ---
+  if (toolName === 'Read' || toolName === 'read' ||
+      toolName === 'ReadFile' || toolName === 'read_file') {
+    const args = input.toolArgs as { file_path?: string; path?: string };
+    const filePath = args?.file_path || args?.path || '';
+    for (const pattern of SENSITIVE_PATH_PATTERNS) {
+      if (pattern.test(filePath)) {
+        return {
+          permissionDecision: 'deny' as const,
+          permissionDecisionReason: `Reading ${filePath} is blocked to protect secrets`,
+        };
+      }
+    }
+  }
+
+  return;
 }
 ```
 
@@ -307,6 +338,29 @@ onPreToolUse: async (input: PreToolUseHookInput) => {
 The CLI child inherits the parent's `process.env`, so **secrets on process.env leak to bash commands**.
 Always pass `githubToken` explicitly and use the `onPreToolUse` hook to strip secrets from bash.
 
+> **Security**: The `env` option on `CopilotClient` controls what environment the CLI subprocess
+> inherits. Pass a minimal env (HOME, PATH, NODE_OPTIONS, LANG) instead of letting it inherit
+> `process.env`. This limits what `/proc/<pid>/environ` exposes and prevents host secrets from
+> leaking to the CLI subprocess.
+
+### Token Isolation (Defense in Depth)
+
+The `COPILOT_SDK_AUTH_TOKEN` environment variable is an irreducible requirement — the SDK
+must set it for the CLI subprocess. Since the agent's Bash tool runs commands that inherit
+the CLI's env, multiple layers prevent token exfiltration:
+
+1. **Minimal CLI env**: `CopilotClient({ env: minimalEnv })` passes only HOME, PATH,
+   NODE_OPTIONS, LANG. The CLI subprocess does NOT inherit `process.env`.
+2. **Bash unset prefix**: `onPreToolUse` injects `unset COPILOT_SDK_AUTH_TOKEN ...` before
+   every Bash command, stripping the token from subprocess environments.
+3. **`/proc/environ` blocking**: `onPreToolUse` denies Bash commands containing
+   `/proc/<pid>/environ` and file reads of `/proc/*/environ` paths.
+4. **Post-init scrubbing**: After `client.start()`, the agent-runner deletes
+   `containerInput.secrets`, and clears `COPILOT_SDK_AUTH_TOKEN`, `GITHUB_TOKEN`,
+   `GH_TOKEN` from `process.env`.
+5. **No temp file**: Stdin is piped directly to Node via `exec` in the Dockerfile
+   entrypoint — secrets are never written to disk.
+
 ### Session Persistence
 
 - `configDir` tells the CLI where to store session transcripts (`{configDir}/sessions/{id}.jsonl`)
@@ -316,15 +370,21 @@ Always pass `githubToken` explicitly and use the `onPreToolUse` hook to strip se
 ### Gotchas
 
 - **Default timeout is 60s**: `sendAndWait()` defaults to 60 seconds. Agent tasks need 600+ seconds.
-- **Permissions default to deny**: Without `onPermissionRequest: approveAll`, all tool calls are denied.
+- **Permissions default to deny**: Without `onPermissionRequest`, all tool calls are denied.
+  Use a custom handler returning `{ kind: 'approved' }` for headless operation.
 - **Hook errors are swallowed**: If a hook handler throws, the error is logged but not surfaced.
 - **Tool handler errors return strings**: If a tool handler throws, the error message is returned to
   the LLM as a tool result (not re-thrown to the caller).
 - **`getMessages()` returns `SessionEvent[]`**: Not plain messages. Filter by `event.type === 'user.message'`
   or `'assistant.message'` to get conversation content.
 - **MCP servers require `tools` field**: Must specify `tools: ['*']` or a list of tool names.
-- **CLI inherits parent env**: The CLI process gets all of `process.env` plus SDK-injected vars.
-  Bash tool commands inherit the CLI's env. Use `onPreToolUse` to strip secrets.
+- **CLI inherits parent env by default**: The CLI process gets all of `process.env` plus SDK-injected vars.
+  **Always pass `env: minimalEnv` to CopilotClient** to prevent this. Then use `onPreToolUse` to
+  strip `COPILOT_SDK_AUTH_TOKEN` from Bash commands.
+- **`/proc/environ` bypasses `unset`**: Even after `unset`, the original env is readable via
+  `/proc/<pid>/environ`. Block this path in `onPreToolUse` for both Bash and file read tools.
+- **`onPreToolUse` deny format**: Use `{ permissionDecision: 'deny', permissionDecisionReason: '...' }`
+  to block tool invocations (not `{ decision: 'deny' }`).
 
 ---
 

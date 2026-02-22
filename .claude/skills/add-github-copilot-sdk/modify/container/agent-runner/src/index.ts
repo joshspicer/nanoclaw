@@ -22,10 +22,8 @@ import {
   SessionConfig,
   ResumeSessionConfig,
   SessionEvent,
-  SessionHooks,
-  PreToolUseHookInput,
-  approveAll,
 } from '@github/copilot-sdk';
+import type { PermissionRequest, PermissionRequestResult } from '@github/copilot-sdk';
 import { fileURLToPath } from 'url';
 
 interface ContainerInput {
@@ -35,6 +33,7 @@ interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  model?: string;
   secrets?: Record<string, string>;
 }
 
@@ -288,15 +287,51 @@ function buildSessionConfig(
     ...Object.keys(containerInput.secrets || {}),
   ];
 
-  const hooks: SessionHooks = {
-    // Sanitize bash commands: strip secret env vars from subprocess environments.
-    // Mirrors the original PreToolUse/Bash hook from the Claude Agent SDK.
-    onPreToolUse: async (input: PreToolUseHookInput) => {
-      if (input.toolName !== 'Bash' && input.toolName !== 'bash') return;
-      const args = input.toolArgs as { command?: string };
-      if (!args?.command) return;
-      const unsetPrefix = `unset ${secretEnvVars.join(' ')} 2>/dev/null; `;
-      return { modifiedArgs: { ...args, command: unsetPrefix + args.command } };
+  // Paths that should never be readable by the agent — they may contain secrets.
+  const SENSITIVE_PATH_PATTERNS = [
+    /\/proc\/.*\/environ/,   // Process environment (contains COPILOT_SDK_AUTH_TOKEN)
+    /\/proc\/self\/environ/,
+    /\/tmp\/input\.json/,     // Legacy: stdin temp file (eliminated, but block defensively)
+  ];
+
+  const hooks: SessionConfig['hooks'] = {
+    // Sanitize tool invocations to prevent secret leakage.
+    onPreToolUse: async (input) => {
+      const toolName = input.toolName;
+
+      // --- Bash commands: strip secret env vars + block /proc/environ reads ---
+      if (toolName === 'Bash' || toolName === 'bash') {
+        const args = input.toolArgs as { command?: string };
+        if (!args?.command) return;
+
+        // Block commands that try to read /proc/*/environ
+        if (/\/proc\/[^/]+\/environ/.test(args.command)) {
+          return {
+            permissionDecision: 'deny' as const,
+            permissionDecisionReason: 'Reading /proc/*/environ is blocked to protect secrets',
+          };
+        }
+
+        const unsetPrefix = `unset ${secretEnvVars.join(' ')} 2>/dev/null; `;
+        return { modifiedArgs: { ...args, command: unsetPrefix + args.command } };
+      }
+
+      // --- File read tools: block reads of sensitive paths ---
+      if (toolName === 'Read' || toolName === 'read' ||
+          toolName === 'ReadFile' || toolName === 'read_file') {
+        const args = input.toolArgs as { file_path?: string; path?: string };
+        const filePath = args?.file_path || args?.path || '';
+        for (const pattern of SENSITIVE_PATH_PATTERNS) {
+          if (pattern.test(filePath)) {
+            return {
+              permissionDecision: 'deny' as const,
+              permissionDecisionReason: `Reading ${filePath} is blocked to protect secrets`,
+            };
+          }
+        }
+      }
+
+      return;
     },
 
     // Archive conversation when session ends (crash, timeout, normal exit).
@@ -322,10 +357,11 @@ function buildSessionConfig(
     workingDirectory: '/workspace/group',
     // Use the mounted .copilot directory for session persistence across container runs
     configDir: '/home/node/.copilot',
+    model: containerInput.model || undefined,
     systemMessage: globalClaudeMd
       ? { mode: 'append', content: globalClaudeMd }
       : undefined,
-    onPermissionRequest: approveAll,
+    onPermissionRequest: async (_request: PermissionRequest): Promise<PermissionRequestResult> => ({ kind: 'approved' }),
     hooks,
     skillDirectories: skillDirectories.length > 0 ? skillDirectories : undefined,
     mcpServers: {
@@ -349,8 +385,6 @@ async function main(): Promise<void> {
   try {
     const stdinData = await readStdin();
     containerInput = JSON.parse(stdinData);
-    // Delete the temp file the entrypoint wrote — it contains secrets
-    try { fs.unlinkSync('/tmp/input.json'); } catch { /* may not exist */ }
     log(`Received input for group: ${containerInput.groupFolder}`);
   } catch (err) {
     writeOutput({
@@ -419,10 +453,21 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // Pass a minimal environment to the CLI subprocess so it does NOT inherit
+  // process.env. The SDK adds COPILOT_SDK_AUTH_TOKEN automatically.
+  // This limits what the CLI child process (and its /proc/<pid>/environ) exposes.
+  const minimalEnv: Record<string, string> = {
+    HOME: '/home/node',
+    PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
+    NODE_OPTIONS: '--dns-result-order=ipv4first',
+    LANG: 'C.UTF-8',
+  };
+
   const client = new CopilotClient({
     logLevel: 'info',
     cwd: '/workspace/group',
     githubToken,
+    env: minimalEnv,
   });
 
   let session: CopilotSession | null = null;
@@ -432,6 +477,25 @@ async function main(): Promise<void> {
     log('Starting Copilot client...');
     await client.start();
     log('Copilot client started');
+
+    // Log available models so we can see what IDs are valid
+    try {
+      const models = await client.listModels();
+      const modelIds = models.map(m => m.id);
+      log(`Available models: ${modelIds.join(', ')}`);
+    } catch (err) {
+      log(`Failed to list models: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // Scrub secrets from this process's memory and environment.
+    // The SDK has already passed the token to the CLI subprocess — we no
+    // longer need it in the agent-runner Node process.
+    delete containerInput.secrets;
+    delete (containerInput as any).githubToken;
+    // Remove any env vars the SDK may have leaked into our process.env
+    delete process.env.COPILOT_SDK_AUTH_TOKEN;
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
 
     // Build session config — pass archive function for the onSessionEnd hook
     const doArchive = async (sid: string) => {
@@ -448,6 +512,7 @@ async function main(): Promise<void> {
     const sessionConfig = buildSessionConfig(mcpServerPath, containerInput, globalClaudeMd, doArchive);
 
     // Create or resume session ONCE - keep it alive for entire conversation
+    log(`Requested model: ${containerInput.model || '(default)'}`);
     if (containerInput.sessionId) {
       log(`Resuming session: ${containerInput.sessionId}`);
       session = await client.resumeSession(containerInput.sessionId, sessionConfig as ResumeSessionConfig);
@@ -457,7 +522,14 @@ async function main(): Promise<void> {
     }
 
     const sessionId = session.sessionId;
-    log(`Session ready: ${sessionId}`);
+
+    // Log the model the SDK actually resolved to
+    try {
+      const currentModel = await session.rpc.model.getCurrent();
+      log(`Session ready: ${sessionId} (model: ${currentModel.modelId || 'unknown'})`);
+    } catch {
+      log(`Session ready: ${sessionId} (could not query resolved model)`);
+    }
 
     // Set up error logging
     session.on('session.error', (event) => {
