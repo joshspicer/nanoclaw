@@ -53,21 +53,23 @@ elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
 fi
 log "Container runtime: $CONTAINER_RUNTIME"
 
-# 3. Check credentials
-CREDENTIALS="missing"
+# 3. Check credentials (GitHub token for Copilot SDK)
+GITHUB_TOKEN_STATUS="missing"
 if [ -f "$PROJECT_ROOT/.env" ]; then
-  if grep -qE "^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)=" "$PROJECT_ROOT/.env" 2>/dev/null; then
-    CREDENTIALS="configured"
+  if grep -qE "^(GITHUB_TOKEN|GH_TOKEN)=" "$PROJECT_ROOT/.env" 2>/dev/null; then
+    GITHUB_TOKEN_STATUS="configured"
   fi
 fi
-log "Credentials: $CREDENTIALS"
+log "GitHub token: $GITHUB_TOKEN_STATUS"
 
-# 4. Check WhatsApp auth
-WHATSAPP_AUTH="not_found"
-if [ -d "$PROJECT_ROOT/store/auth" ] && [ "$(ls -A "$PROJECT_ROOT/store/auth" 2>/dev/null)" ]; then
-  WHATSAPP_AUTH="authenticated"
+# 4. Check Telegram bot token
+TELEGRAM_BOT_TOKEN_STATUS="missing"
+if [ -f "$PROJECT_ROOT/.env" ]; then
+  if grep -qE "^TELEGRAM_BOT_TOKEN=" "$PROJECT_ROOT/.env" 2>/dev/null; then
+    TELEGRAM_BOT_TOKEN_STATUS="configured"
+  fi
 fi
-log "WhatsApp auth: $WHATSAPP_AUTH"
+log "Telegram bot token: $TELEGRAM_BOT_TOKEN_STATUS"
 
 # 5. Check registered groups (in SQLite — the JSON file gets migrated away on startup)
 REGISTERED_GROUPS=0
@@ -85,7 +87,7 @@ log "Mount allowlist: $MOUNT_ALLOWLIST"
 
 # Determine overall status
 STATUS="success"
-if [ "$SERVICE" != "running" ] || [ "$CREDENTIALS" = "missing" ] || [ "$WHATSAPP_AUTH" = "not_found" ] || [ "$REGISTERED_GROUPS" -eq 0 ] 2>/dev/null; then
+if [ "$SERVICE" != "running" ] || [ "$GITHUB_TOKEN_STATUS" = "missing" ] || [ "$TELEGRAM_BOT_TOKEN_STATUS" = "missing" ] || [ "$REGISTERED_GROUPS" -eq 0 ] 2>/dev/null; then
   STATUS="failed"
 fi
 
@@ -95,8 +97,8 @@ cat <<EOF
 === NANOCLAW SETUP: VERIFY ===
 SERVICE: $SERVICE
 CONTAINER_RUNTIME: $CONTAINER_RUNTIME
-CREDENTIALS: $CREDENTIALS
-WHATSAPP_AUTH: $WHATSAPP_AUTH
+GITHUB_TOKEN: $GITHUB_TOKEN_STATUS
+TELEGRAM_BOT_TOKEN: $TELEGRAM_BOT_TOKEN_STATUS
 REGISTERED_GROUPS: $REGISTERED_GROUPS
 MOUNT_ALLOWLIST: $MOUNT_ALLOWLIST
 STATUS: $STATUS

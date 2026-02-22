@@ -66,10 +66,17 @@ if [ -f "$PROJECT_ROOT/.env" ]; then
   log ".env file found"
 fi
 
-HAS_AUTH="false"
-if [ -d "$PROJECT_ROOT/store/auth" ] && [ "$(ls -A "$PROJECT_ROOT/store/auth" 2>/dev/null)" ]; then
-  HAS_AUTH="true"
-  log "WhatsApp auth credentials found"
+HAS_TELEGRAM_BOT_TOKEN="false"
+HAS_GITHUB_TOKEN="false"
+if [ -f "$PROJECT_ROOT/.env" ]; then
+  if grep -qE "^TELEGRAM_BOT_TOKEN=" "$PROJECT_ROOT/.env" 2>/dev/null; then
+    HAS_TELEGRAM_BOT_TOKEN="true"
+    log "Telegram bot token found in .env"
+  fi
+  if grep -qE "^(GITHUB_TOKEN|GH_TOKEN)=" "$PROJECT_ROOT/.env" 2>/dev/null; then
+    HAS_GITHUB_TOKEN="true"
+    log "GitHub token found in .env"
+  fi
 fi
 
 HAS_REGISTERED_GROUPS="false"
@@ -95,7 +102,8 @@ NODE_OK: $NODE_OK
 APPLE_CONTAINER: $APPLE_CONTAINER
 DOCKER: $DOCKER
 HAS_ENV: $HAS_ENV
-HAS_AUTH: $HAS_AUTH
+HAS_TELEGRAM_BOT_TOKEN: $HAS_TELEGRAM_BOT_TOKEN
+HAS_GITHUB_TOKEN: $HAS_GITHUB_TOKEN
 HAS_REGISTERED_GROUPS: $HAS_REGISTERED_GROUPS
 STATUS: success
 LOG: logs/setup.log
