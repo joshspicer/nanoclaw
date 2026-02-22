@@ -28,6 +28,10 @@ Updated host-side container runner for Copilot SDK session persistence and authe
 - Container naming convention unchanged (`nanoclaw-<folder>-<timestamp>`)
 - Mount security (allowlist validation) unchanged
 
+### Model routing
+- Added: `model?: string` field to `ContainerInput` interface
+- Added: Promotes agent-runner model logs (Available models, Requested model, Session ready) from DEBUG to INFO level via pattern matching on container stderr lines
+
 ## Must-keep
 - `runContainerAgent()` function signature and return type
 - `writeGroupsSnapshot()` and `writeTasksSnapshot()` exports

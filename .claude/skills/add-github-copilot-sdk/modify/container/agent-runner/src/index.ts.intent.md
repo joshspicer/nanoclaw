@@ -28,6 +28,11 @@ Complete rewrite of the agent runner from Claude Agent SDK (`ClaudeClient`/`Sess
 - MCP servers configured with `tools: ['*']` wildcard
 - `model` field from `containerInput.model` for per-request model selection
 
+### Model logging
+- After `client.start()`: calls `client.listModels()` and logs all available model IDs
+- Before session creation: logs the requested model from `containerInput.model`
+- After session creation: calls `session.rpc.model.getCurrent()` and logs the resolved model ID
+
 ### Security hardening
 
 **Minimal CLI environment** (`env` option on CopilotClient):

@@ -56,6 +56,14 @@ Currently: `@github/copilot-sdk@^0.1.25` (SDK source is at `0.1.8`; npm may be a
    GITHUB_TOKEN=ghp_xxxx
    ```
 
+2. (Optional) Configure model routing in `.env`:
+   ```
+   MODEL_FAST=claude-haiku-4.5           # Short/simple chat messages
+   MODEL_DEEP_THOUGHT=claude-opus-4.6-1m  # Complex tasks, scheduled tasks
+   ```
+   Model IDs come from the Copilot SDK's `listModels()`. Available IDs are logged at
+   container startup. Leave empty to use the SDK's default model for everything.
+
 2. Rebuild container:
    ```bash
    ./container/build.sh
@@ -150,7 +158,7 @@ const config: SessionConfig = {
   // Core
   workingDirectory: '/workspace/group',
   configDir: '/home/node/.copilot',             // Session persistence directory
-  model: 'claude-sonnet-4',                     // Optional model override
+  model: 'claude-opus-4.6',                     // Optional model override (per-session)
   reasoningEffort: 'high',                      // 'low' | 'medium' | 'high' | 'xhigh'
 
   // System prompt
@@ -366,6 +374,23 @@ the CLI's env, multiple layers prevent token exfiltration:
 - `configDir` tells the CLI where to store session transcripts (`{configDir}/sessions/{id}.jsonl`)
 - `resumeSession(id)` looks up the transcript in the config directory
 - Infinite sessions (default enabled) automatically compact when context gets large
+
+### Model Routing
+
+Model is set **per-session** at creation time via `SessionConfig.model`. To switch models
+mid-conversation requires creating a new session (the host orchestrator handles this
+automatically when `MODEL_FAST` / `MODEL_DEEP_THOUGHT` are configured).
+
+```typescript
+// Query available models
+const models = await client.listModels();  // ModelInfo[] with id, name, capabilities
+
+// Query current session's model
+const current = await session.rpc.model.getCurrent();  // { modelId?: string }
+
+// Switch model mid-session (creates new context)
+await session.rpc.model.switchTo({ modelId: 'claude-haiku-4.5' });
+```
 
 ### Gotchas
 

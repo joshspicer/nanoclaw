@@ -7,6 +7,8 @@ import {
   DATA_DIR,
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
+  MODEL_DEEP_THOUGHT,
+  MODEL_FAST,
   POLL_INTERVAL,
   TELEGRAM_BOT_TOKEN,
   TRIGGER_PATTERN,
@@ -45,6 +47,7 @@ export { escapeXml, formatMessages } from './router.js';
 
 let lastTimestamp = '';
 let sessions: Record<string, string> = {};
+let sessionModels: Record<string, string> = {}; // tracks which model each session was created with
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
@@ -209,14 +212,58 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   return true;
 }
 
+/**
+ * Pick which model to use for this invocation.
+ * Returns empty string to use the SDK's default model.
+ */
+function pickModel(group: RegisteredGroup, prompt: string, isScheduledTask?: boolean): string {
+  // Per-group override takes priority (set via containerConfig)
+  if (group.containerConfig?.model) return group.containerConfig.model;
+
+  // If no model routing configured, let the SDK pick its default
+  if (!MODEL_DEEP_THOUGHT && !MODEL_FAST) return '';
+
+  // Scheduled tasks use the deep thought model — they're usually complex
+  if (isScheduledTask) return MODEL_DEEP_THOUGHT || '';
+
+  // Use the fast model for short, simple messages (casual chat)
+  // Use the default model for longer, more complex requests
+  if (MODEL_FAST) {
+    const stripped = prompt.replace(TRIGGER_PATTERN, '').trim();
+    const wordCount = stripped.split(/\s+/).length;
+    const looksComplex =
+      wordCount > 40 ||
+      /\b(implement|refactor|debug|fix|build|deploy|analyze|review|create|design|write code|architect)\b/i.test(stripped);
+    if (!looksComplex) return MODEL_FAST;
+  }
+
+  return MODEL_DEEP_THOUGHT || '';
+}
+
 async function runAgent(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  isScheduledTask?: boolean,
 ): Promise<'success' | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
-  const sessionId = sessions[group.folder];
+  let sessionId: string | undefined = sessions[group.folder];
+
+  // Pick model for this invocation
+  const model = pickModel(group, prompt, isScheduledTask);
+
+  // If current session was created with a different model, start fresh.
+  // Model is locked per-session in the Copilot SDK, so we must create a new session.
+  if (sessionId && model && sessionModels[group.folder] && sessionModels[group.folder] !== model) {
+    logger.info(
+      { group: group.name, from: sessionModels[group.folder], to: model },
+      'Model changed, starting new session',
+    );
+    sessionId = undefined;
+    delete sessions[group.folder];
+    setSession(group.folder, '');
+  }
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -248,6 +295,7 @@ async function runAgent(
     ? async (output: ContainerOutput) => {
         if (output.newSessionId) {
           sessions[group.folder] = output.newSessionId;
+          sessionModels[group.folder] = model;
           setSession(group.folder, output.newSessionId);
         }
         await onOutput(output);
@@ -263,6 +311,8 @@ async function runAgent(
         groupFolder: group.folder,
         chatJid,
         isMain,
+        isScheduledTask,
+        model: model || undefined,
       },
       (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
@@ -270,6 +320,7 @@ async function runAgent(
 
     if (output.newSessionId) {
       sessions[group.folder] = output.newSessionId;
+      sessionModels[group.folder] = model;
       setSession(group.folder, output.newSessionId);
     }
 

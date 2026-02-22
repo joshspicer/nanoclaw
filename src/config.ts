@@ -8,6 +8,8 @@ import { readEnvFile } from './env.js';
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'TELEGRAM_BOT_TOKEN',
+  'MODEL_FAST',
+  'MODEL_DEEP_THOUGHT',
 ]);
 
 export const ASSISTANT_NAME =
@@ -64,6 +66,13 @@ export const TRIGGER_PATTERN = new RegExp(
 // Uses system timezone by default
 export const TIMEZONE =
   process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+// Model configuration — values are model IDs as returned by the Copilot SDK's listModels().
+// Examples: "claude-sonnet-4", "claude-opus-4", "claude-haiku-3.5", "gpt-4o", "o3"
+// Leave empty to use the SDK's default model.
+export const MODEL_DEEP_THOUGHT = process.env.MODEL_DEEP_THOUGHT || envConfig.MODEL_DEEP_THOUGHT || '';
+// Fast model for simple chat / short messages
+export const MODEL_FAST = process.env.MODEL_FAST || envConfig.MODEL_FAST || '';
 
 // Telegram configuration
 export const TELEGRAM_BOT_TOKEN =
